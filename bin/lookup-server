@@ -35,7 +35,10 @@ def set_coarse_location(train):
 
     for i, stopover in enumerate(stopovers):
         if stopover["departure"]:
-            stopover["departure"] = dateutil.parser.parse(stopover["departure"])
+            try:
+                stopover["departure"] = dateutil.parser.parse(stopover["departure"])
+            except TypeError:
+                return
 
         # start with origin. (planned)arrival is always null in a previousStopovers list
         departure = stopover["departure"]
@@ -70,7 +73,13 @@ def set_coarse_location(train):
                 train["stop"]["location"]["longitude"],
             ),
         )
-        train_times = (stopovers[-1]["departure"], dateutil.parser.parse(train["when"]))
+        try:
+            train_times = (
+                stopovers[-1]["departure"],
+                dateutil.parser.parse(train["when"]),
+            )
+        except TypeError:
+            return
 
     if not train_times[0]:
         return
