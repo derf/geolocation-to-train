@@ -33,16 +33,25 @@ def set_coarse_location(train):
     train_evas = None
     stopovers = train["previousStopovers"]
 
+    # includes train["stop"] -- but with arrival instead of departure
     for i, stopover in enumerate(stopovers):
+        ts = None
         if stopover["departure"]:
             try:
                 stopover["departure"] = dateutil.parser.parse(stopover["departure"])
+                ts = stopover["departure"]
+            except TypeError:
+                return
+        if stopover["arrival"]:
+            try:
+                stopover["arrival"] = dateutil.parser.parse(stopover["arrival"])
+                ts = stopover["arrival"]
             except TypeError:
                 return
 
-        # start with origin. (planned)arrival is always null in a previousStopovers list
-        departure = stopover["departure"]
-        if i > 0 and departure and departure > now:
+        # start with origin. (planned)arrival is always null in a previousStopovers list except for the last entry
+        # (which is the stop where arrivals were requested)
+        if i > 0 and ts and ts > now:
             train_evas = (
                 int(stopovers[i - 1]["stop"]["id"]),
                 int(stopover["stop"]["id"]),
@@ -58,30 +67,12 @@ def set_coarse_location(train):
                     stopover["stop"]["location"]["longitude"],
                 ),
             )
-            # XXX known bug: we're saving departure at i-1 and departure at i. For a more accurate coarse position estimate later on,
-            # we need to track departure at i-1 and arrival at i. But we don't have it...
-            train_times = (stopovers[i - 1]["departure"], departure)
+            # XXX known bug: we're saving departure at i-1 and (possibly) departure at i. For a more accurate coarse position estimate later on,
+            # we need to track departure at i-1 and arrival at i. But we don't always have it.
+            train_times = (stopovers[i - 1]["departure"], ts)
             break
     if not train_evas:
-        train_evas = (int(train["stop"]["id"]), int(stopovers[-1]["stop"]["id"]))
-        train_stops = (train["stop"]["name"], stopovers[-1]["stop"]["name"])
-        train_coords = (
-            (
-                stopovers[-1]["stop"]["location"]["latitude"],
-                stopovers[-1]["stop"]["location"]["longitude"],
-            ),
-            (
-                train["stop"]["location"]["latitude"],
-                train["stop"]["location"]["longitude"],
-            ),
-        )
-        try:
-            train_times = (
-                stopovers[-1]["departure"],
-                dateutil.parser.parse(train["when"]),
-            )
-        except TypeError:
-            return
+        return
 
     if not train_times[0]:
         return
@@ -108,6 +99,12 @@ def set_coarse_location(train):
             coords[1][0] * ratio + coords[0][0] * (1 - ratio),
             coords[1][1] * ratio + coords[0][1] * (1 - ratio),
         )
+
+    if train_evas[1] == int(train["stop"]["id"]):
+        # we can compare departure at previous stop with arrival at this stop. this is most accurate for position estimation.
+        train["preferred"] = True
+    else:
+        train["preferred"] = False
 
 
 def calculate_distance(train, latlon):
@@ -198,9 +195,11 @@ async def handle_search(request):
     for train in trains:
         calculate_distance(train, (lat, lon))
 
-    trains = sorted(trains, key=lambda train: train["distance"])
+    trains = sorted(
+        trains, key=lambda train: 0 if train["preferred"] else train["distance"]
+    )
 
-    # remove duplicates. for now, we keep the version with the lowest estimated distance.
+    # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
     seen = set()
     trains = [
@@ -209,6 +208,7 @@ async def handle_search(request):
         if train["line"]["fahrtNr"] not in seen
     ]
 
+    trains = sorted(trains, key=lambda train: train["distance"])
     trains = list(map(format_train, trains[:10]))
 
     response = {"evas": list(evas), "trains": trains}
