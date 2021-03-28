@@ -104,15 +104,25 @@ def calculate_distance(train, latlon):
 
 
 def format_train(train):
+    train_type, line_no = train["line"]["name"].split()
+    train_no = train["line"]["fahrtNr"]
     return {
-        "line": train["line"]["name"],
-        "no": train["line"]["fahrtNr"],
+        "line": f"{train_type} {line_no}",
+        "train": f"{train_type} {train_no}",
         "tripId": train["tripId"],
         "location": train["coarse_location"],
-        "distance": train["distance"],
+        "distance": round(train["distance"], 1),
         "stops": [
-            (train["evas"][0], train["stop_names"][0], train["times"][0].isoformat()),
-            (train["evas"][1], train["stop_names"][1], train["times"][1].isoformat()),
+            (
+                train["evas"][0],
+                train["stop_names"][0],
+                train["times"][0].strftime("%H:%M"),
+            ),
+            (
+                train["evas"][1],
+                train["stop_names"][1],
+                train["times"][1].strftime("%H:%M"),
+            ),
         ],
     }
 
@@ -185,7 +195,7 @@ async def handle_search(request):
         calculate_distance(train, (lat, lon))
 
     trains = sorted(trains, key=lambda train: train["distance"])
-    trains = list(map(format_train, trains))
+    trains = list(map(format_train, trains[:10]))
 
     response = {"evas": list(evas), "trains": trains}
 
