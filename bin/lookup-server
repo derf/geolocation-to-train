@@ -58,6 +58,8 @@ def set_coarse_location(train):
                     stopover["stop"]["location"]["longitude"],
                 ),
             )
+            # XXX known bug: we're saving departure at i-1 and departure at i. For a more accurate coarse position estimate later on,
+            # we need to track departure at i-1 and arrival at i. But we don't have it...
             train_times = (stopovers[i - 1]["departure"], departure)
             break
     if not train_evas:
@@ -188,13 +190,6 @@ async def handle_search(request):
             if is_candidate:
                 trains.append(train)
 
-    seen = set()
-    trains = [
-        seen.add(train["line"]["fahrtNr"]) or train
-        for train in trains
-        if train["line"]["fahrtNr"] not in seen
-    ]
-
     for train in trains:
         set_coarse_location(train)
 
@@ -204,6 +199,16 @@ async def handle_search(request):
         calculate_distance(train, (lat, lon))
 
     trains = sorted(trains, key=lambda train: train["distance"])
+
+    # remove duplicates. for now, we keep the version with the lowest estimated distance.
+    # later on, we'll need to request polylines and perform accurate calculations.
+    seen = set()
+    trains = [
+        seen.add(train["line"]["fahrtNr"]) or train
+        for train in trains
+        if train["line"]["fahrtNr"] not in seen
+    ]
+
     trains = list(map(format_train, trains[:10]))
 
     response = {"evas": list(evas), "trains": trains}
