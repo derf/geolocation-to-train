@@ -10,6 +10,7 @@ import json
 import numpy as np
 import os
 import psycopg2
+import psycopg2.extras
 import requests
 import sys
 
@@ -112,9 +113,6 @@ with open("data/nvbw/shapes.txt", "r") as f:
 
 
 def add_stops(lat, lon, stops):
-    lut_lat_center = round(lat * 1000)
-    lut_lon_center = round(lon * 1000)
-
     evas = list()
     for stop in stops:
         try:
@@ -125,12 +123,21 @@ def add_stops(lat, lon, stops):
             except KeyError:
                 pass
 
+    add_evas(lat, lon, evas)
+
+
+def add_evas(lat, lon, evas):
+    lut_lat_center = round(lat * 1000)
+    lut_lon_center = round(lon * 1000)
+
     for lut_lat in range(lut_lat_center - 0, lut_lat_center + 1):
         for lut_lon in range(lut_lon_center - 0, lut_lon_center + 1):
             if (lut_lat, lut_lon) not in stops_by_latlon:
                 stops_by_latlon[(lut_lat, lut_lon)] = set()
             stops_by_latlon[(lut_lat, lut_lon)].update(evas)
 
+
+# Here be dragons. I don't recall what this code does. It shouldn't be too complicated, though.
 
 print("Loading stop_times ...")
 stops_by_tripid = dict()
@@ -172,6 +179,34 @@ for shape_id in ProgressBar("Calculating neighoubrs", max=num_shapes).iter(
                 ):
                     add_stops(lat, lon, (stop_name, stops[i + 1][0]))
 
+try:
+    with open("data/polydump.json", "r") as f:
+        polylines = list(map(Polyline, json.load(f)))
+
+    class Polyline:
+        def __init__(self, json_data):
+            self.coordinates = json_data["polyline"]
+
+    def add_leg(coordinates, from_eva, to_eva):
+        for lat, lon in coordinates:
+            add_evas(lat, lon, (from_eva, to_eva))
+
+    for polyline in ProgressBar("Adding polydump data", max=len(polylines)).iter(
+        polylines
+    ):
+        prev_eva = None
+        leg = list()
+        for coord in polyline.coordinates:
+            leg.append((coord[1], coord[0]))
+            if len(coord) > 2 and coord[2] != prev_eva:
+                if prev_eva:
+                    add_leg(leg, prev_eva, coord[2])
+                prev_eva = coord[2]
+                leg = list()
+
+except FileNotFoundError:
+    pass
+
 num_latlons = len(stops_by_latlon.keys())
 
 with conn.cursor() as cur:
@@ -186,13 +221,22 @@ with conn.cursor() as cur:
     """
     )
 
-for (lat, lon), stops in ProgressBar("Inserting coordinates", max=num_latlons).iter(
-    stops_by_latlon.items()
+insert_groups = list()
+insert_group = list()
+for (lat, lon), stops in stops_by_latlon.items():
+    insert_group.append((lat, lon, json.dumps(list(stops))))
+    if len(insert_group) >= 50:
+        insert_groups.append(insert_group)
+        insert_group = list()
+
+insert_groups.append(insert_group)
+
+for insert_group in ProgressBar("Inserting coordinates", max=len(insert_groups)).iter(
+    insert_groups
 ):
     with conn.cursor() as cur:
-        cur.execute(
-            """insert into stations (lat, lon, stations) values (%s, %s, %s)""",
-            (lat, lon, json.dumps(list(stops))),
+        psycopg2.extras.execute_values(
+            cur, """insert into stations (lat, lon, stations) values %s""", insert_group
         )
 
 conn.commit()
