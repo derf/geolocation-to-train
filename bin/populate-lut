@@ -180,12 +180,12 @@ for shape_id in ProgressBar("Calculating neighoubrs", max=num_shapes).iter(
                     add_stops(lat, lon, (stop_name, stops[i + 1][0]))
 
 try:
-    with open("data/polydump.json", "r") as f:
-        polylines = list(map(Polyline, json.load(f)))
-
     class Polyline:
         def __init__(self, json_data):
             self.coordinates = json_data["polyline"]
+
+    with open("data/polydump.json", "r") as f:
+        polylines = list(map(Polyline, json.load(f)))
 
     def add_leg(coordinates, from_eva, to_eva):
         for lat, lon in coordinates:
@@ -197,7 +197,19 @@ try:
         prev_eva = None
         leg = list()
         for coord in polyline.coordinates:
-            leg.append((coord[1], coord[0]))
+            lat = coord[1]
+            lon = coord[0]
+            if leg:
+                prev_lat = leg[-1][0]
+                prev_lon = leg[-1][1]
+                prev_dist = distance((prev_lat, prev_lon), (lat, lon)).m
+                for i in np.arange(200, prev_dist, 200):
+                    ratio = i / prev_dist
+                    assert 0 <= ratio <= 1
+                    rel_lat = (prev_lat * ratio + lat * (1 - ratio)) / 2
+                    rel_lon = (prev_lon * ratio + lon * (1 - ratio)) / 2
+                    leg.append((rel_lat, rel_lon))
+            leg.append((lat, lon))
             if len(coord) > 2 and coord[2] != prev_eva:
                 if prev_eva:
                     add_leg(leg, prev_eva, coord[2])
