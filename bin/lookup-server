@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import dateutil.parser
 from geopy.distance import distance
 import json
+import logging
 import os
 import pytz
 
@@ -166,6 +167,7 @@ async def handle_search(request):
 
     # deliberately not parallelized to minimize load on transport.rest
     for eva in evas:
+        logging.debug(f"Requesting arrivals at {eva}")
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"https://v5.db.transport.rest/stops/{eva}/arrivals?results=40&duration=120&stopovers=true&bus=false&subway=false&tram=false"
@@ -187,6 +189,8 @@ async def handle_search(request):
             if is_candidate:
                 trains.append(train)
 
+    logging.debug(f"{len(trains)} trains travel between at least two requested evas")
+
     for train in trains:
         set_coarse_location(train)
 
@@ -198,6 +202,8 @@ async def handle_search(request):
     trains = sorted(
         trains, key=lambda train: 0 if train["preferred"] else train["distance"]
     )
+
+    logging.debug(f"{len(trains)} trains have a coarse location")
 
     # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
