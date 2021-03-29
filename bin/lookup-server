@@ -29,7 +29,7 @@ conn.autocommit = True
 conn.set_session(readonly=True)
 
 
-def set_coarse_location(train):
+def set_coarse_location(train, latlon):
     now = datetime.now(pytz.utc)
     train_evas = None
     stopovers = train["previousStopovers"]
@@ -101,15 +101,30 @@ def set_coarse_location(train):
             coords[1][1] * ratio + coords[0][1] * (1 - ratio),
         )
 
+    if distance(train["coords"][0], train["coords"][1]).km < 15:
+        # do not request polyline if the train is between stops less than 15km apart. This speeds up requests
+        # (and reduces transport.rest load) at a hopefully low impact on accuracy.
+        train["location"] = train["coarse_location"]
+
     if train_evas[1] == int(train["stop"]["id"]):
         # we can compare departure at previous stop with arrival at this stop. this is most accurate for position estimation.
         train["preferred"] = True
     else:
         train["preferred"] = False
 
-
-def calculate_distance(train, latlon):
     train["distance"] = distance(train["coarse_location"], latlon).km
+
+
+async def set_location(train):
+    trip_id = train["tripId"]
+    line = train["line"]["name"]
+    url = f"https://v5.db.transport.rest/trips/{trip_id}?lineName={line}&polyline=true"
+    return
+    logging.debug(f"Requesting polyline for {line}: {url}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            content = await response.text()
+            content = json.loads(content)
 
 
 def format_train(train):
@@ -192,12 +207,9 @@ async def handle_search(request):
     logging.debug(f"{len(trains)} trains travel between at least two requested evas")
 
     for train in trains:
-        set_coarse_location(train)
+        set_coarse_location(train, (lat, lon))
 
     trains = list(filter(lambda train: "coarse_location" in train, trains))
-
-    for train in trains:
-        calculate_distance(train, (lat, lon))
 
     trains = sorted(
         trains, key=lambda train: 0 if train["preferred"] else train["distance"]
@@ -207,12 +219,22 @@ async def handle_search(request):
 
     # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
+    # TODO polyline requests are not needed for trains currently located at a station (ratio == 0 / == 1)
+    # It should also be fine to skip them if the distance between stops[0] and stops[1] is less than ~ 20km
+    # Wenn sich ein Zug gerade an einem Bahnhof befindet (ratio == 0 / == 1) und mehrere km entfernt ist kann man ihn auch direkt ganz rausfiltern
     seen = set()
     trains = [
         seen.add(train["line"]["fahrtNr"]) or train
         for train in trains
         if train["line"]["fahrtNr"] not in seen
     ]
+
+    logging.debug(f"{len(trains)} trains remain after deduplication")
+    need_fine = list(filter(lambda train: "location" not in train, trains))
+    logging.debug(f"{len(need_fine)} trains need a polyline")
+
+    for train in trains:
+        await set_location(train)
 
     trains = sorted(trains, key=lambda train: train["distance"])
     trains = list(map(format_train, trains[:10]))
@@ -227,9 +249,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="geolocation to train estimation service"
     )
+    parser.add_argument(
+        "--log-level",
+        metavar="LEVEL",
+        choices=["debug", "info", "warning", "error"],
+        default="warning",
+        help="Set log level",
+    )
     parser.add_argument("--port", type=int, metavar="PORT", default=8080)
     parser.add_argument("--prefix", type=str, metavar="PATH", default="/")
     args = parser.parse_args()
+
+    if args.log_level:
+        numeric_level = getattr(logging, args.log_level.upper(), None)
+        if not isinstance(numeric_level, int):
+            print(f"Invalid log level: {args.log_level}", file=sys.stderr)
+            sys.exit(1)
+        logging.basicConfig(level=numeric_level)
 
     app = web.Application()
     app.add_routes([web.get(f"{args.prefix}search", handle_search)])
