@@ -101,8 +101,8 @@ def set_coarse_location(train, latlon):
             coords[1][1] * ratio + coords[0][1] * (1 - ratio),
         )
 
-    if distance(train["coords"][0], train["coords"][1]).km < 15:
-        # do not request polyline if the train is between stops less than 15km apart. This speeds up requests
+    if distance(train["coords"][0], train["coords"][1]).km < 20:
+        # do not request polyline if the train is between stops less than 20km apart. This speeds up requests
         # (and reduces transport.rest load) at a hopefully low impact on accuracy.
         train["location"] = train["coarse_location"]
 
@@ -112,6 +112,8 @@ def set_coarse_location(train, latlon):
     else:
         train["preferred"] = False
 
+    # the time (i.e., number of minutes) the train needs to travel to reach the requested position
+    # might be a better metric than raw distance.
     train["distance"] = distance(train["coarse_location"], latlon).km
 
 
@@ -125,6 +127,10 @@ async def set_location(train):
         async with session.get(url) as response:
             content = await response.text()
             content = json.loads(content)
+
+
+def is_in_transit(train):
+    return 0 < train["progress_ratio"] < 1
 
 
 def format_train(train):
@@ -210,12 +216,11 @@ async def handle_search(request):
         set_coarse_location(train, (lat, lon))
 
     trains = list(filter(lambda train: "coarse_location" in train, trains))
+    logging.debug(f"{len(trains)} trains have a coarse location")
 
     trains = sorted(
         trains, key=lambda train: 0 if train["preferred"] else train["distance"]
     )
-
-    logging.debug(f"{len(trains)} trains have a coarse location")
 
     # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
@@ -231,6 +236,7 @@ async def handle_search(request):
 
     logging.debug(f"{len(trains)} trains remain after deduplication")
     need_fine = list(filter(lambda train: "location" not in train, trains))
+    need_fine = list(filter(is_in_transit, trains))
     logging.debug(f"{len(need_fine)} trains need a polyline")
 
     for train in trains:
