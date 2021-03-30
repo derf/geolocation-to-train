@@ -36,6 +36,8 @@ trips_by_shape_id = dict()
 name_to_eva = dict()
 eva_to_name = dict()
 
+lut_grid_step = 100
+
 try:
     with open("data/iris-stations.json", "r") as f:
         for station in json.load(f):
@@ -84,6 +86,27 @@ with open("data/nvbw/trips.txt", "r") as f:
             trips_by_shape_id[shape_id] = list()
         trips_by_shape_id[shape_id].append(trip_id)
 
+print("Loading stop_times ...")
+stops_by_tripid = dict()
+with open("data/nvbw/stop_times.txt", "r") as f:
+    f.readline()
+    cr = csv.reader(f)
+    for row in cr:
+        (
+            trip_id,
+            stop_id,
+            arrival_time,
+            departure_time,
+            stop_seq,
+            stop_headsign,
+            pickup_type,
+            dropoff_type,
+            dist,
+        ) = row
+        if trip_id not in stops_by_tripid:
+            stops_by_tripid[trip_id] = list()
+        stops_by_tripid[trip_id].append((stop_headsign, float(dist)))
+
 print("Loading shapes ...")
 with open("data/nvbw/shapes.txt", "r") as f:
     f.readline()
@@ -98,9 +121,9 @@ with open("data/nvbw/shapes.txt", "r") as f:
         lat = float(lat)
         lon = float(lon)
         dist = float(dist)
-        if dist > prev_dist and dist - prev_dist > 200:
-            # ensure shape entries are no more than 200m apart
-            for i in np.arange(200, dist - prev_dist, 200):
+        if dist > prev_dist and dist - prev_dist > lut_grid_step:
+            # ensure shape entries are no more than lut_grid_step meters apart
+            for i in np.arange(lut_grid_step, dist - prev_dist, lut_grid_step):
                 ratio = i / (dist - prev_dist)
                 assert 0 <= ratio <= 1
                 rel_lat = (prev_lat * ratio + lat * (1 - ratio)) / 2
@@ -139,27 +162,6 @@ def add_evas(lat, lon, evas):
 
 # Here be dragons. I don't recall what this code does. It shouldn't be too complicated, though.
 
-print("Loading stop_times ...")
-stops_by_tripid = dict()
-with open("data/nvbw/stop_times.txt", "r") as f:
-    f.readline()
-    cr = csv.reader(f)
-    for row in cr:
-        (
-            trip_id,
-            stop_id,
-            arrival_time,
-            departure_time,
-            stop_seq,
-            stop_headsign,
-            pickup_type,
-            dropoff_type,
-            dist,
-        ) = row
-        if trip_id not in stops_by_tripid:
-            stops_by_tripid[trip_id] = list()
-        stops_by_tripid[trip_id].append((stop_headsign, float(dist)))
-
 num_shapes = len(shape.keys())
 
 for shape_id in ProgressBar("Calculating neighoubrs", max=num_shapes).iter(
@@ -180,6 +182,7 @@ for shape_id in ProgressBar("Calculating neighoubrs", max=num_shapes).iter(
                     add_stops(lat, lon, (stop_name, stops[i + 1][0]))
 
 try:
+
     class Polyline:
         def __init__(self, json_data):
             self.coordinates = json_data["polyline"]
@@ -203,7 +206,7 @@ try:
                 prev_lat = leg[-1][0]
                 prev_lon = leg[-1][1]
                 prev_dist = distance((prev_lat, prev_lon), (lat, lon)).m
-                for i in np.arange(200, prev_dist, 200):
+                for i in np.arange(lut_grid_step, prev_dist, lut_grid_step):
                     ratio = i / prev_dist
                     assert 0 <= ratio <= 1
                     rel_lat = (prev_lat * ratio + lat * (1 - ratio)) / 2
@@ -237,7 +240,7 @@ insert_groups = list()
 insert_group = list()
 for (lat, lon), stops in stops_by_latlon.items():
     insert_group.append((lat, lon, json.dumps(list(stops))))
-    if len(insert_group) >= 50:
+    if len(insert_group) >= 100:
         insert_groups.append(insert_group)
         insert_group = list()
 
