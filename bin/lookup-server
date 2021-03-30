@@ -25,6 +25,8 @@ conn = psycopg2.connect(
     host=os.getenv("GEOLOOKUP_DBHOST", "localhost"),
 )
 
+db_rest_api = os.getenv("GEOLOOKUP_DB_REST_API", "https://v5.db.transport.rest")
+
 conn.autocommit = True
 conn.set_session(readonly=True)
 
@@ -120,7 +122,7 @@ def set_coarse_location(train, latlon):
 async def set_location(train):
     trip_id = train["tripId"]
     line = train["line"]["name"]
-    url = f"https://v5.db.transport.rest/trips/{trip_id}?lineName={line}&polyline=true"
+    url = f"{db_rest_api}/trips/{trip_id}?lineName={line}&polyline=true"
     return
     logging.debug(f"Requesting polyline for {line}: {url}")
     async with aiohttp.ClientSession() as session:
@@ -191,7 +193,7 @@ async def handle_search(request):
         logging.debug(f"Requesting arrivals at {eva}")
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"https://v5.db.transport.rest/stops/{eva}/arrivals?results=40&duration=120&stopovers=true&bus=false&subway=false&tram=false"
+                f"{db_rest_api}/stops/{eva}/arrivals?results=40&duration=120&stopovers=true&bus=false&subway=false&tram=false"
             ) as response:
                 content = await response.text()
                 content = json.loads(content)
