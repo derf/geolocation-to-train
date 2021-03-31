@@ -36,6 +36,8 @@ trips_by_shape_id = dict()
 name_to_eva = dict()
 eva_to_name = dict()
 
+# lon + 0.003 ≙ 190 to 220 m
+# lat + 0.003 ≙ 333 m
 lut_grid_step = 100
 
 try:
@@ -126,8 +128,8 @@ with open("data/nvbw/shapes.txt", "r") as f:
             for i in np.arange(lut_grid_step, dist - prev_dist, lut_grid_step):
                 ratio = i / (dist - prev_dist)
                 assert 0 <= ratio <= 1
-                rel_lat = (prev_lat * ratio + lat * (1 - ratio)) / 2
-                rel_lon = (prev_lon * ratio + lon * (1 - ratio)) / 2
+                rel_lat = prev_lat * ratio + lat * (1 - ratio)
+                rel_lon = prev_lon * ratio + lon * (1 - ratio)
                 shape[shape_id].append((rel_lat, rel_lon, dist))
         shape[shape_id].append((lat, lon, dist))
         prev_dist = dist
@@ -209,8 +211,8 @@ try:
                 for i in np.arange(lut_grid_step, prev_dist, lut_grid_step):
                     ratio = i / prev_dist
                     assert 0 <= ratio <= 1
-                    rel_lat = (prev_lat * ratio + lat * (1 - ratio)) / 2
-                    rel_lon = (prev_lon * ratio + lon * (1 - ratio)) / 2
+                    rel_lat = prev_lat * ratio + lat * (1 - ratio)
+                    rel_lon = prev_lon * ratio + lon * (1 - ratio)
                     leg.append((rel_lat, rel_lon))
             leg.append((lat, lon))
             if len(coord) > 2 and coord[2] != prev_eva:
