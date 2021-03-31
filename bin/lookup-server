@@ -34,6 +34,9 @@ db_rest_api = os.getenv("GEOLOOKUP_DB_REST_API", "https://v5.db.transport.rest")
 conn.autocommit = True
 conn.set_session(readonly=True)
 
+arrivals_request_count = 0
+polyline_request_count = 0
+
 
 def set_coarse_location(train, latlon):
     now = datetime.now(pytz.utc)
@@ -129,6 +132,8 @@ async def set_location(train):
     url = f"{db_rest_api}/trips/{trip_id}?lineName={line}&polyline=true"
     return
     logging.debug(f"Requesting polyline for {line}: {url}")
+    global polyline_request_count
+    polyline_request_count += 1
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             content = await response.text()
@@ -163,6 +168,14 @@ def format_train(train):
     }
 
 
+async def handle_stats(request):
+    response = {
+        "arrivals_request_count": arrivals_request_count,
+        "polyline_request_count": polyline_request_count,
+    }
+    return web.Response(body=json.dumps(response), headers=headers)
+
+
 async def handle_search(request):
     try:
         lat = float(request.query.get("lat"))
@@ -195,6 +208,8 @@ async def handle_search(request):
     # deliberately not parallelized to minimize load on transport.rest
     for eva in evas:
         logging.debug(f"Requesting arrivals at {eva}")
+        global arrivals_request_count
+        arrivals_request_count += 1
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{db_rest_api}/stops/{eva}/arrivals?results=40&duration=120&stopovers=true&bus=false&subway=false&tram=false"
@@ -280,5 +295,10 @@ if __name__ == "__main__":
         logging.basicConfig(level=numeric_level)
 
     app = web.Application()
-    app.add_routes([web.get(f"{args.prefix}search", handle_search)])
+    app.add_routes(
+        [
+            web.get(f"{args.prefix}search", handle_search),
+            web.get(f"{args.prefix}stats", handle_stats),
+        ]
+    )
     web.run_app(app, host="localhost", port=args.port)
