@@ -17,6 +17,143 @@ import logging
 import os
 import pytz
 
+
+class Stop:
+    def __init__(self, eva, name, coord, ts):
+        self.eva = eva
+        self.name = name
+        self.coord = coord
+        self.when = ts
+
+    def to_json(self):
+        return self.eva, self.name, self.when.strftime("%H:%M")
+
+
+class Train:
+    def __init__(self, train):
+        self.stopovers = train["previousStopovers"]
+        self.tripId = train["tripId"]
+        self.train_type, self.line_no = train["line"]["name"].split()
+        self.train_no = train["line"]["fahrtNr"]
+        self.request_eva = int(train["stop"]["id"])
+
+        # preferred candidate for position estimation?
+        self.preferred = False
+
+        # previous/next stop and progress between those
+        self.prev_stop = None
+        self.next_stop = None
+        self.progress_ratio = None
+
+        # location and distance to requested position
+        self.coarse_location = None
+        self.location = None
+        self.distance = None
+
+    def set_coarse_location(self, lat, lon):
+        now = datetime.now(pytz.utc)
+        train_evas = None
+
+        # includes train["stop"] -- but with arrival instead of departure
+        # FIXME stopovers do not have realtime data :(
+        for i, stopover in enumerate(self.stopovers):
+            ts = None
+            if stopover["departure"]:
+                try:
+                    stopover["departure"] = dateutil.parser.parse(stopover["departure"])
+                    ts = stopover["departure"]
+                except TypeError:
+                    return
+            if stopover["arrival"]:
+                try:
+                    stopover["arrival"] = dateutil.parser.parse(stopover["arrival"])
+                    ts = stopover["arrival"]
+                except TypeError:
+                    return
+
+            # start with origin. (planned)arrival is always null in a previousStopovers list except for the last entry
+            # (which is the stop where arrivals were requested)
+            if i > 0 and ts and ts > now:
+                train_evas = (
+                    int(self.stopovers[i - 1]["stop"]["id"]),
+                    int(stopover["stop"]["id"]),
+                )
+                train_stops = (
+                    self.stopovers[i - 1]["stop"]["name"],
+                    stopover["stop"]["name"],
+                )
+                train_coords = (
+                    (
+                        self.stopovers[i - 1]["stop"]["location"]["latitude"],
+                        self.stopovers[i - 1]["stop"]["location"]["longitude"],
+                    ),
+                    (
+                        stopover["stop"]["location"]["latitude"],
+                        stopover["stop"]["location"]["longitude"],
+                    ),
+                )
+                # XXX known bug: we're saving departure at i-1 and (possibly) departure at i. For a more accurate coarse position estimate later on,
+                # we need to track departure at i-1 and arrival at i. But we don't always have it.
+                train_times = (self.stopovers[i - 1]["departure"], ts)
+                break
+        if not train_evas:
+            return
+
+        if not train_times[0]:
+            return
+
+        self.set_stops(
+            Stop(train_evas[0], train_stops[0], train_coords[0], train_times[0]),
+            Stop(train_evas[1], train_stops[1], train_coords[1], train_times[1]),
+        )
+
+        # the time (i.e., number of minutes) the train needs to travel to reach the requested position
+        # might be a better metric than raw distance.
+        self.distance = distance(self.coarse_location, (lat, lon)).km
+
+    def set_stops(self, prev_stop, next_stop):
+        self.prev_stop = prev_stop
+        self.next_stop = next_stop
+
+        now = datetime.now(pytz.utc)
+
+        self.progress_ratio = 1 - (
+            (next_stop.when.timestamp() - now.timestamp())
+            / (next_stop.when.timestamp() - prev_stop.when.timestamp())
+        )
+        self.progress_ratio = max(0, min(1, self.progress_ratio))
+
+        if self.progress_ratio == 0:
+            self.location = self.coarse_location = prev_stop.coord
+        elif self.progress_ratio == 1:
+            self.location = self.coarse_location = next_stop.coord
+        else:
+            ratio = self.progress_ratio
+            self.coarse_location = (
+                next_stop.coord[0] * ratio + prev_stop.coord[0] * (1 - ratio),
+                next_stop.coord[1] * ratio + prev_stop.coord[1] * (1 - ratio),
+            )
+
+        if distance(prev_stop.coord, next_stop.coord).km < 20:
+            # do not request polyline if the train is between stops less than 20km apart. This speeds up requests
+            # (and reduces transport.rest load) at a hopefully low impact on accuracy.
+            self.location = self.coarse_location
+
+        if next_stop.eva == self.request_eva:
+            # we can compare departure at previous stop with arrival at this stop. this is most accurate for position estimation.
+            self.preferred = True
+
+    def to_json(self):
+        return {
+            "line": f"{self.train_type} {self.line_no}",
+            "train": f"{self.train_type} {self.train_no}",
+            "tripId": self.tripId,
+            "location": self.coarse_location,
+            "distance": round(self.distance, 1),
+            "stops": [self.prev_stop.to_json(), self.next_stop.to_json()],
+        }
+
+
 headers = {
     "Access-Control-Allow-Origin": "*",
     "Content-Type": "application/json; charset=utf-8",
@@ -38,97 +175,9 @@ arrivals_request_count = 0
 polyline_request_count = 0
 
 
-def set_coarse_location(train, latlon):
-    now = datetime.now(pytz.utc)
-    train_evas = None
-    stopovers = train["previousStopovers"]
-
-    # includes train["stop"] -- but with arrival instead of departure
-    for i, stopover in enumerate(stopovers):
-        ts = None
-        if stopover["departure"]:
-            try:
-                stopover["departure"] = dateutil.parser.parse(stopover["departure"])
-                ts = stopover["departure"]
-            except TypeError:
-                return
-        if stopover["arrival"]:
-            try:
-                stopover["arrival"] = dateutil.parser.parse(stopover["arrival"])
-                ts = stopover["arrival"]
-            except TypeError:
-                return
-
-        # start with origin. (planned)arrival is always null in a previousStopovers list except for the last entry
-        # (which is the stop where arrivals were requested)
-        if i > 0 and ts and ts > now:
-            train_evas = (
-                int(stopovers[i - 1]["stop"]["id"]),
-                int(stopover["stop"]["id"]),
-            )
-            train_stops = (stopovers[i - 1]["stop"]["name"], stopover["stop"]["name"])
-            train_coords = (
-                (
-                    stopovers[i - 1]["stop"]["location"]["latitude"],
-                    stopovers[i - 1]["stop"]["location"]["longitude"],
-                ),
-                (
-                    stopover["stop"]["location"]["latitude"],
-                    stopover["stop"]["location"]["longitude"],
-                ),
-            )
-            # XXX known bug: we're saving departure at i-1 and (possibly) departure at i. For a more accurate coarse position estimate later on,
-            # we need to track departure at i-1 and arrival at i. But we don't always have it.
-            train_times = (stopovers[i - 1]["departure"], ts)
-            break
-    if not train_evas:
-        return
-
-    if not train_times[0]:
-        return
-
-    train["evas"] = train_evas
-    train["stop_names"] = train_stops
-    train["coords"] = train_coords
-    train["times"] = train_times
-
-    train["progress_ratio"] = 1 - (
-        (train["times"][1].timestamp() - now.timestamp())
-        / (train["times"][1].timestamp() - train["times"][0].timestamp())
-    )
-    train["progress_ratio"] = max(0, min(1, train["progress_ratio"]))
-
-    if train["progress_ratio"] == 0:
-        train["location"] = train["coarse_location"] = train["coords"][0]
-    elif train["progress_ratio"] == 1:
-        train["location"] = train["coarse_location"] = train["coords"][1]
-    else:
-        ratio = train["progress_ratio"]
-        coords = train["coords"]
-        train["coarse_location"] = (
-            coords[1][0] * ratio + coords[0][0] * (1 - ratio),
-            coords[1][1] * ratio + coords[0][1] * (1 - ratio),
-        )
-
-    if distance(train["coords"][0], train["coords"][1]).km < 20:
-        # do not request polyline if the train is between stops less than 20km apart. This speeds up requests
-        # (and reduces transport.rest load) at a hopefully low impact on accuracy.
-        train["location"] = train["coarse_location"]
-
-    if train_evas[1] == int(train["stop"]["id"]):
-        # we can compare departure at previous stop with arrival at this stop. this is most accurate for position estimation.
-        train["preferred"] = True
-    else:
-        train["preferred"] = False
-
-    # the time (i.e., number of minutes) the train needs to travel to reach the requested position
-    # might be a better metric than raw distance.
-    train["distance"] = distance(train["coarse_location"], latlon).km
-
-
 async def set_location(train):
-    trip_id = train["tripId"]
-    line = train["line"]["name"]
+    trip_id = train.tripId
+    line = f"{train.train_type} {train.line_no}"
     url = f"{db_rest_api}/trips/{trip_id}?lineName={line}&polyline=true"
     return
     logging.debug(f"Requesting polyline for {line}: {url}")
@@ -141,31 +190,7 @@ async def set_location(train):
 
 
 def is_in_transit(train):
-    return 0 < train["progress_ratio"] < 1
-
-
-def format_train(train):
-    train_type, line_no = train["line"]["name"].split()
-    train_no = train["line"]["fahrtNr"]
-    return {
-        "line": f"{train_type} {line_no}",
-        "train": f"{train_type} {train_no}",
-        "tripId": train["tripId"],
-        "location": train["coarse_location"],
-        "distance": round(train["distance"], 1),
-        "stops": [
-            (
-                train["evas"][0],
-                train["stop_names"][0],
-                train["times"][0].strftime("%H:%M"),
-            ),
-            (
-                train["evas"][1],
-                train["stop_names"][1],
-                train["times"][1].strftime("%H:%M"),
-            ),
-        ],
-    }
+    return 0 < train.progress_ratio < 1
 
 
 async def handle_stats(request):
@@ -229,19 +254,17 @@ async def handle_search(request):
                     is_candidate = True
                     break
             if is_candidate:
-                trains.append(train)
+                trains.append(Train(train))
 
     logging.debug(f"{len(trains)} trains travel between at least two requested evas")
 
     for train in trains:
-        set_coarse_location(train, (lat, lon))
+        train.set_coarse_location(lat, lon)
 
-    trains = list(filter(lambda train: "coarse_location" in train, trains))
+    trains = list(filter(lambda train: train.coarse_location, trains))
     logging.debug(f"{len(trains)} trains have a coarse location")
 
-    trains = sorted(
-        trains, key=lambda train: 0 if train["preferred"] else train["distance"]
-    )
+    trains = sorted(trains, key=lambda train: 0 if train.preferred else train.distance)
 
     # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
@@ -250,21 +273,24 @@ async def handle_search(request):
     # Wenn sich ein Zug gerade an einem Bahnhof befindet (ratio == 0 / == 1) und mehrere km entfernt ist kann man ihn auch direkt ganz rausfiltern
     seen = set()
     trains = [
-        seen.add(train["line"]["fahrtNr"]) or train
+        seen.add(train.train_no) or train
         for train in trains
-        if train["line"]["fahrtNr"] not in seen
+        if train.train_no not in seen
     ]
 
     logging.debug(f"{len(trains)} trains remain after deduplication")
-    need_fine = list(filter(lambda train: "location" not in train, trains))
+
+    # If a train's coarse location is 50km+ away, it's fine (polyline-based) location is highly unlikely to be much closer
+    trains = list(filter(lambda train: train.distance < 50, trains))
+    need_fine = list(filter(lambda train: not train.location, trains))
     need_fine = list(filter(is_in_transit, trains))
     logging.debug(f"{len(need_fine)} trains need a polyline")
 
     for train in trains:
         await set_location(train)
 
-    trains = sorted(trains, key=lambda train: train["distance"])
-    trains = list(map(format_train, trains[:10]))
+    trains = sorted(trains, key=lambda train: train.distance)
+    trains = list(map(lambda train: train.to_json(), trains[:10]))
 
     response = {"evas": list(evas), "trains": trains}
 
