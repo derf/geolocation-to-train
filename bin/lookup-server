@@ -110,6 +110,9 @@ class Train:
                 ts = stopover["arrival"]
 
             if i == 0:
+                if ts > now and (ts - now).seconds > 300:
+                    # train has not departed from its initial stop yet and is not about to depart
+                    return
                 continue
 
             prev_eva = int(self.stopovers[i - 1]["stop"]["id"])
