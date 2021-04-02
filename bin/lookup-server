@@ -18,6 +18,8 @@ import numpy as np
 import os
 import pytz
 
+max_distance = 50
+
 
 class Stop:
     def __init__(self, eva, name, coord, ts):
@@ -216,6 +218,7 @@ class Train:
             "tripId": self.tripId,
             "location": self.coarse_location,
             "distance": round(self.distance, 1),
+            "likelihood": round(100 - self.distance * 100 / max_distance, 0),
             "stops": [self.prev_stop.to_json(), self.next_stop.to_json()],
         }
 
@@ -353,8 +356,8 @@ async def handle_search(request):
 
     logging.debug(f"{len(trains)} trains remain after deduplication")
 
-    # If a train's coarse location is 50km+ away, it's fine (polyline-based) location is highly unlikely to be much closer
-    trains = list(filter(lambda train: train.distance < 50, trains))
+    # If a train's coarse location is more than max_distance km away, it's fine (polyline-based) location is highly unlikely to be much closer
+    trains = list(filter(lambda train: train.distance < max_distance, trains))
     need_fine = list(filter(lambda train: not train.location, trains))
     need_fine = list(filter(is_in_transit, trains))
     logging.debug(f"{len(need_fine)} trains need a polyline")
