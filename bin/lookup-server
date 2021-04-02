@@ -37,6 +37,16 @@ class Train:
         self.train_no = train["line"]["fahrtNr"]
         self.request_eva = int(train["stop"]["id"])
 
+        if train["when"]:
+            self.arrival = dateutil.parser.parse(train["when"])
+        else:
+            self.arrival = None
+
+        if train["delay"] is not None:
+            self.delay = timedelta(seconds=train["delay"])
+        else:
+            self.delay = timedelta()
+
         # preferred candidate for position estimation?
         self.preferred = False
 
@@ -50,6 +60,39 @@ class Train:
         self.location = None
         self.distance = None
 
+        self.prepare_stopovers()
+
+    def prepare_stopovers(self):
+        """
+        Parse arrival/departure into datetimes and add delay.
+
+        /arrivals results have delay information ("when" ≠ "plannedWhen"). "previousStopovers" do not ("departure" == "plannedDeparture" in all cases).
+        """
+        for stopover in self.stopovers:
+            if (
+                stopover["arrival"]
+                and stopover["plannedArrival"]
+                and stopover["arrival"] != stopover["plannedArrival"]
+            ):
+                # arrival should be realtime. Didn't observe this case in practice yet.
+                stopover["arrival"] = dateutil.parser.parse(stopover["arrival"])
+            elif stopover["plannedArrival"]:
+                # no realtime data available
+                stopover["arrival"] = (
+                    dateutil.parser.parse(stopover["plannedArrival"]) + self.delay
+                )
+
+            if (
+                stopover["departure"]
+                and stopover["plannedDeparture"]
+                and stopover["departure"] != stopover["plannedDeparture"]
+            ):
+                stopover["departure"] = dateutil.parser.parse(stopover["departure"])
+            elif stopover["plannedDeparture"]:
+                stopover["departure"] = (
+                    dateutil.parser.parse(stopover["plannedDeparture"]) + self.delay
+                )
+
     def set_coarse_location(self, lat, lon):
         now = datetime.now(pytz.utc)
         train_evas = None
@@ -59,17 +102,9 @@ class Train:
         for i, stopover in enumerate(self.stopovers):
             ts = None
             if stopover["departure"]:
-                try:
-                    stopover["departure"] = dateutil.parser.parse(stopover["departure"])
-                    ts = stopover["departure"]
-                except TypeError:
-                    return
-            if stopover["arrival"]:
-                try:
-                    stopover["arrival"] = dateutil.parser.parse(stopover["arrival"])
-                    ts = stopover["arrival"]
-                except TypeError:
-                    return
+                ts = stopover["departure"]
+            elif stopover["arrival"]:
+                ts = stopover["arrival"]
 
             # start with origin. (planned)arrival is always null in a previousStopovers list except for the last entry
             # (which is the stop where arrivals were requested)
@@ -142,6 +177,10 @@ class Train:
         if next_stop.eva == self.request_eva:
             # we can compare departure at previous stop with arrival at this stop. this is most accurate for position estimation.
             self.preferred = True
+
+    def merge_with(self, instance):
+        # might be useful in the future
+        pass
 
     def to_json(self):
         return {
@@ -228,7 +267,7 @@ async def handle_search(request):
         return web.Response(body=json.dumps(response), headers=headers)
 
     arrivals = list()
-    trains = list()
+    candidates = list()
 
     # deliberately not parallelized to minimize load on transport.rest
     for eva in evas:
@@ -245,38 +284,45 @@ async def handle_search(request):
 
     for train_list in arrivals:
         for train in train_list:
-            is_candidate = False
             for stop in train["previousStopovers"]:
                 if (
                     int(stop["stop"]["id"]) in evas
                     and stop["stop"]["id"] != train["stop"]["id"]
                 ):
-                    is_candidate = True
+                    candidates.append(Train(train))
                     break
-            if is_candidate:
-                trains.append(Train(train))
 
-    logging.debug(f"{len(trains)} trains travel between at least two requested evas")
+    logging.debug(
+        f"{len(candidates)} trains travel between at least two requested evas"
+    )
 
-    for train in trains:
+    for train in candidates:
         train.set_coarse_location(lat, lon)
 
-    trains = list(filter(lambda train: train.coarse_location, trains))
-    logging.debug(f"{len(trains)} trains have a coarse location")
+    candidates = list(filter(lambda train: train.coarse_location, candidates))
+    logging.debug(f"{len(candidates)} trains have a coarse location")
 
-    trains = sorted(trains, key=lambda train: 0 if train.preferred else train.distance)
+    candidates = sorted(
+        candidates, key=lambda train: 0 if train.preferred else train.distance
+    )
 
     # remove duplicates. for now, we keep the preferred version, or the one with the lowest estimated distance.
     # later on, we'll need to request polylines and perform accurate calculations.
     # TODO polyline requests are not needed for trains currently located at a station (ratio == 0 / == 1)
     # It should also be fine to skip them if the distance between stops[0] and stops[1] is less than ~ 20km
     # Wenn sich ein Zug gerade an einem Bahnhof befindet (ratio == 0 / == 1) und mehrere km entfernt ist kann man ihn auch direkt ganz rausfiltern
-    seen = set()
-    trains = [
-        seen.add(train.train_no) or train
-        for train in trains
-        if train.train_no not in seen
-    ]
+    seen = dict()
+    trains = list()
+
+    for train in candidates:
+        if train.preferred:
+            trains.append(train)
+            seen[train.train_no] = train
+        elif train.train_no not in seen:
+            trains.append(train)
+            seen[train.train_no] = train
+        else:
+            seen[train.train_no].merge_with(train)
 
     logging.debug(f"{len(trains)} trains remain after deduplication")
 
