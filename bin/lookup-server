@@ -14,6 +14,7 @@ import dateutil.parser
 from geopy.distance import distance
 import json
 import logging
+import numpy as np
 import os
 import pytz
 
@@ -96,6 +97,8 @@ class Train:
     def set_coarse_location(self, lat, lon):
         now = datetime.now(pytz.utc)
         train_evas = None
+        legs = list()
+        leg_distances = list()
 
         # includes train["stop"] -- but with arrival instead of departure
         # FIXME stopovers do not have realtime data :(
@@ -106,35 +109,56 @@ class Train:
             elif stopover["arrival"]:
                 ts = stopover["arrival"]
 
+            if i == 0:
+                continue
+
+            prev_eva = int(self.stopovers[i - 1]["stop"]["id"])
+            this_eva = int(stopover["stop"]["id"])
+
+            prev_coord = (
+                self.stopovers[i - 1]["stop"]["location"]["latitude"],
+                self.stopovers[i - 1]["stop"]["location"]["longitude"],
+            )
+            this_coord = (
+                stopover["stop"]["location"]["latitude"],
+                stopover["stop"]["location"]["longitude"],
+            )
+
+            # TODO normalize coordinates (distance is skewed towards longitude)
+            prev_c = np.array(prev_coord)
+            this_c = np.array(this_coord)
+            req_c = np.array((lat, lon))
+            min_dist = np.abs(
+                np.cross(prev_c - this_c, this_c - req_c)
+            ) / np.linalg.norm(prev_c - this_c)
+
+            legs.append((prev_eva, this_eva))
+            leg_distances.append(min_dist)
+
             # start with origin. (planned)arrival is always null in a previousStopovers list except for the last entry
             # (which is the stop where arrivals were requested)
-            if i > 0 and ts and ts > now:
-                train_evas = (
-                    int(self.stopovers[i - 1]["stop"]["id"]),
-                    int(stopover["stop"]["id"]),
-                )
+            if ts and ts > now and not train_evas:
+                train_evas = (prev_eva, this_eva)
                 train_stops = (
                     self.stopovers[i - 1]["stop"]["name"],
                     stopover["stop"]["name"],
                 )
-                train_coords = (
-                    (
-                        self.stopovers[i - 1]["stop"]["location"]["latitude"],
-                        self.stopovers[i - 1]["stop"]["location"]["longitude"],
-                    ),
-                    (
-                        stopover["stop"]["location"]["latitude"],
-                        stopover["stop"]["location"]["longitude"],
-                    ),
-                )
+                train_coords = (prev_coord, this_coord)
+
                 # XXX known bug: we're saving departure at i-1 and (possibly) departure at i. For a more accurate coarse position estimate later on,
                 # we need to track departure at i-1 and arrival at i. But we don't always have it.
                 train_times = (self.stopovers[i - 1]["departure"], ts)
-                break
+
         if not train_evas:
             return
 
         if not train_times[0]:
+            return
+
+        closest_leg_index = np.argmin(leg_distances)
+        closest_evas = legs[closest_leg_index]
+
+        if train_evas != closest_evas:
             return
 
         self.set_stops(
