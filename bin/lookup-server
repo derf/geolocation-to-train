@@ -36,7 +36,11 @@ class Train:
     def __init__(self, train):
         self.stopovers = train["previousStopovers"]
         self.tripId = train["tripId"]
-        self.train_type, self.line_no = train["line"]["name"].split()
+        try:
+            self.train_type, self.line_no = train["line"]["name"].split()
+        except ValueError:
+            self.train_type = train["line"]["name"]
+            self.line_no = ""
         self.train_no = train["line"]["fahrtNr"]
         self.request_eva = int(train["stop"]["id"])
 
