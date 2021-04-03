@@ -17,6 +17,7 @@ import logging
 import numpy as np
 import os
 import pytz
+import sys
 
 max_distance = 50
 
@@ -238,11 +239,10 @@ conn = psycopg2.connect(
     password=os.getenv("GEOLOOKUP_DBPASS"),
     host=os.getenv("GEOLOOKUP_DBHOST", "localhost"),
 )
-
-db_rest_api = os.getenv("GEOLOOKUP_DB_REST_API", "https://v5.db.transport.rest")
-
 conn.autocommit = True
 conn.set_session(readonly=True)
+
+db_rest_api = os.getenv("GEOLOOKUP_DB_REST_API", "https://v5.db.transport.rest")
 
 arrivals_request_count = 0
 polyline_request_count = 0
@@ -283,18 +283,42 @@ async def handle_search(request):
     except ValueError:
         return web.HTTPBadRequest(text="lat/lon must be floating-point numbers")
 
+    global conn
+
     lut_lat = round(lat * 1000)
     lut_lon = round(lon * 1000)
 
     evas = set()
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "select stations from stations where lat between %s and %s and lon between %s and %s",
-            (lut_lat - 3, lut_lat + 3, lut_lon - 3, lut_lon + 3),
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select stations from stations where lat between %s and %s and lon between %s and %s",
+                (lut_lat - 3, lut_lat + 3, lut_lon - 3, lut_lon + 3),
+            )
+            for eva_list in cur.fetchall():
+                evas.update(eva_list[0])
+    except psycopg2.OperationalError as e:
+        # Database may have been restarted
+        logging.warning(f"Cannot handle train request: {e}")
+        conn = psycopg2.connect(
+            dbname=os.getenv("GEOLOOKUP_DBNAME", "geo_to_stations"),
+            user=os.getenv("GEOLOOKUP_DBUSER", "geo_to_stations"),
+            password=os.getenv("GEOLOOKUP_DBPASS"),
+            host=os.getenv("GEOLOOKUP_DBHOST", "localhost"),
         )
-        for eva_list in cur.fetchall():
-            evas.update(eva_list[0])
+        conn.autocommit = True
+        conn.set_session(readonly=True)
+        response = {
+            "error": "database connection lost",
+            "evas": list(),
+            "trains": list(),
+        }
+        return web.Response(body=json.dumps(response), headers=headers)
+    except psycopg2.InterfaceError as e:
+        # Database may be down permanently. Notify supervisor that we can't work.
+        logging.error(f"Cannot handle train request: {e}")
+        sys.exit(1)
 
     if not evas:
         response = {"evas": list(), "trains": list()}
